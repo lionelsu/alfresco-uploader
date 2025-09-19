@@ -61,11 +61,37 @@ def ensure_folder(parent_id, folder_name):
 
     url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children"
     data = {"name": folder_name, "nodeType": "cm:folder"}
-    resp = session.post(url, json=data)
-    resp.raise_for_status()
-    folder_id = resp.json()["entry"]["id"]
-    log(f"📁 Criada pasta: {folder_name}")
-    return folder_id
+    try:
+        resp = session.post(url, json=data)
+        resp.raise_for_status()
+        folder_id = resp.json()["entry"]["id"]
+        log(f"📁 Criada pasta: {folder_name}")
+        return folder_id
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 409:
+            # Se a pasta já existe (409), buscar o ID da pasta existente
+            log(f"ℹ Pasta já existe (409), buscando ID: {folder_name}")
+            url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children?where=(isFolder=true)"
+            resp = session.get(url)
+            resp.raise_for_status()
+            entries = resp.json()["list"]["entries"]
+
+            if entries:
+                return entries[0]["entry"]["id"]
+            else:
+                # Se ainda não encontrar, tentar uma busca alternativa
+                url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children"
+                resp = session.get(url)
+                resp.raise_for_status()
+
+                for entry in resp.json()["list"]["entries"]:
+                    if entry["entry"]["name"] == folder_name and entry["entry"]["isFolder"]:
+                        return entry["entry"]["id"]
+
+                # Se não encontrar mesmo após busca, levantar erro
+                raise Exception(f"Pasta '{folder_name}' não encontrada após erro 409")
+        else:
+            raise
 
 def file_exists(parent_id, file_name):
     url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children?where=(isFile=true)"
