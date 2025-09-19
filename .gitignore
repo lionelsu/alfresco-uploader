@@ -185,3 +185,5 @@ fabric.properties
 # .idea
 
 ico
+release
+pyinstaller_command.txt
