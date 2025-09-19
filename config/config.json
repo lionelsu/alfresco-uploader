@@ -1,0 +1,7 @@
+{
+  "ALFRESCO_URL": "http://192.168.4.60:8080/alfresco",
+  "USERNAME": "admin",
+  "PASSWORD": "admin",
+  "SITE": "swsdp",
+  "LOCAL_DIR": "./teste"
+}
