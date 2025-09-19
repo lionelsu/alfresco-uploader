@@ -33,7 +33,6 @@ if not os.path.isdir(LOCAL_DIR):
     input("Pressione ENTER para sair...")
     exit(1)
 
-# cria log com timestamp dentro da pasta logs
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 LOG_FILE = os.path.join(LOGS_DIR, f"upload_log_{timestamp}.txt")
 
@@ -97,7 +96,7 @@ def upload_file(parent_id, file_path, depth=0):
         if e.response.status_code == 409:
             log("  " * depth + f"ℹ Arquivo já existe (409), pulando: {file_name}")
         else:
-            raise  # repassa outros erros
+            raise
 
 def upload_directory(local_dir, parent_id, depth=0):
     for root, dirs, files in os.walk(local_dir):
