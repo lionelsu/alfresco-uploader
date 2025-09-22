@@ -196,13 +196,22 @@ class UploadManager:
                 url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children?where=(isFolder=true)"
                 resp = session.get(url)
                 resp.raise_for_status()
+                entries = resp.json()["list"]["entries"]
 
-                for entry in resp.json()["list"]["entries"]:
-                    if entry["entry"]["name"] == folder_name and entry["entry"]["isFolder"]:
-                        return entry["entry"]["id"]
+                if entries:
+                    return entries[0]["entry"]["id"]
+                else:
+                    # Se ainda não encontrar, tentar uma busca alternativa
+                    url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children"
+                    resp = session.get(url)
+                    resp.raise_for_status()
 
-                # Se não encontrar mesmo após busca, levantar erro
-                raise Exception(f"Pasta '{folder_name}' não encontrada após erro 409")
+                    for entry in resp.json()["list"]["entries"]:
+                        if entry["entry"]["name"] == folder_name and entry["entry"]["isFolder"]:
+                            return entry["entry"]["id"]
+
+                    # Se não encontrar mesmo após busca, levantar erro
+                    raise Exception(f"Pasta '{folder_name}' não encontrada após erro 409")
             else:
                 raise
 

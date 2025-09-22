@@ -186,4 +186,5 @@ fabric.properties
 
 ico
 release
+logs/*.txt
 pyinstaller_command.txt
