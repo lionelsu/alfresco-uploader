@@ -4,6 +4,7 @@ import requests
 import json
 from datetime import datetime, timedelta
 import traceback
+import time
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
@@ -39,9 +40,8 @@ if not os.path.isdir(LOCAL_DIR):
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 LOG_FILE = os.path.join(LOGS_DIR, f"upload_log_{timestamp}.txt")
 
-session = requests.Session()
-session.auth = (USERNAME, PASSWORD)
 
+# Não criamos a sessão global aqui - será criada e recriada quando necessário
 
 class UploadManager:
     def __init__(self):
@@ -79,6 +79,24 @@ class UploadManager:
         self.start_time = None
         self.live = None
         self.current_depth = 0
+        self.session = None  # Sessão será criada quando necessário
+
+    def create_session(self):
+        """Cria uma nova sessão autenticada"""
+        if self.session:
+            self.session.close()  # Fecha a sessão anterior se existir
+
+        self.session = requests.Session()
+        self.session.auth = (USERNAME, PASSWORD)
+        # Configura timeout para evitar esperas infinitas
+        self.session.timeout = 30
+        return self.session
+
+    def get_session(self):
+        """Retorna a sessão atual ou cria uma nova"""
+        if not self.session:
+            self.create_session()
+        return self.session
 
     def format_size(self, bytes_size):
         """Formata bytes para formato legível (KB, MB, GB)"""
@@ -132,8 +150,8 @@ class UploadManager:
         """Renderiza o layout com as duas janelas"""
         # Janela principal com logs
         if self.log_content:
-            # Pega as últimas 40 linhas para display
-            display_logs = self.log_content[-40:]
+            # Pega as últimas 30 linhas para display
+            display_logs = self.log_content[-30:]
             log_text = "\n".join(display_logs)
         else:
             log_text = "Aguardando início do upload..."
@@ -159,104 +177,185 @@ class UploadManager:
         return self.layout
 
     def get_document_library_node(self):
-        url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/sites/{SITE}/containers/documentLibrary"
-        resp = session.get(url)
-        resp.raise_for_status()
-        return resp.json()["entry"]["id"]
+        """Obtém o nó da document library com retry e reconexão"""
+        max_retries = 3
+        retry_delay = 5  # segundos
+
+        for attempt in range(max_retries):
+            try:
+                # Cria nova sessão para cada tentativa
+                session = self.create_session()
+                url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/sites/{SITE}/containers/documentLibrary"
+                resp = session.get(url)
+                resp.raise_for_status()
+                return resp.json()["entry"]["id"]
+
+            except (requests.exceptions.RequestException, requests.exceptions.HTTPError) as e:
+                if attempt < max_retries - 1:
+                    self.log(f"⚠️  Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
+                    self.log(f"🔄 Recriando sessão e tentando novamente em {retry_delay * (attempt + 1)} segundos...")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    raise
 
     def ensure_folder(self, parent_id, folder_name, depth=0):
-        # Primeiro, verifica se a pasta já existe
-        url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children?where=(isFolder=true)"
-        resp = session.get(url)
-        resp.raise_for_status()
+        """Cria pasta com retry e reconexão para erros de rede"""
+        max_retries = 3
+        retry_delay = 900
 
-        for entry in resp.json()["list"]["entries"]:
-            if entry["entry"]["name"] == folder_name:
-                self.log(f"📁 Pasta já existe: {folder_name}", depth)
-                self.stats['skipped_folders'] += 1
-                return entry["entry"]["id"]
+        for attempt in range(max_retries):
+            try:
+                # Cria nova sessão para cada tentativa
+                session = self.create_session()
 
-        # Se não existe, tenta criar
-        url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children"
-        data = {"name": folder_name, "nodeType": "cm:folder"}
-        try:
-            resp = session.post(url, json=data)
-            resp.raise_for_status()
-            folder_id = resp.json()["entry"]["id"]
-            self.log(f"📁 Criada pasta: {folder_name}", depth)
-            self.stats['created_folders'] += 1
-            return folder_id
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 409:
-                # Se a pasta já existe (409), fazer uma nova busca
-                self.log(f"ℹ Pasta já existe (409): {folder_name}", depth)
-                self.stats['skipped_folders'] += 1
-
-                # Buscar a pasta novamente (forma simples que funciona)
+                # Primeiro, verifica se a pasta já existe
                 url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children?where=(isFolder=true)"
                 resp = session.get(url)
                 resp.raise_for_status()
-                entries = resp.json()["list"]["entries"]
 
-                if entries:
-                    return entries[0]["entry"]["id"]
-                else:
-                    # Se ainda não encontrar, tentar uma busca alternativa
-                    url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children"
+                for entry in resp.json()["list"]["entries"]:
+                    if entry["entry"]["name"] == folder_name:
+                        self.log(f"📁 Pasta já existe: {folder_name}", depth)
+                        self.stats['skipped_folders'] += 1
+                        return entry["entry"]["id"]
+
+                # Se não existe, tenta criar
+                url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children"
+                data = {"name": folder_name, "nodeType": "cm:folder"}
+                resp = session.post(url, json=data)
+                resp.raise_for_status()
+                folder_id = resp.json()["entry"]["id"]
+                self.log(f"📁 Criada pasta: {folder_name}", depth)
+                self.stats['created_folders'] += 1
+                return folder_id
+
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 409:
+                    # Se a pasta já existe (409), fazer uma nova busca
+                    self.log(f"ℹ Pasta já existe (409): {folder_name}", depth)
+                    self.stats['skipped_folders'] += 1
+
+                    # Buscar a pasta novamente
+                    session = self.get_session()
+                    url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children?where=(isFolder=true)"
                     resp = session.get(url)
                     resp.raise_for_status()
+                    entries = resp.json()["list"]["entries"]
 
-                    for entry in resp.json()["list"]["entries"]:
-                        if entry["entry"]["name"] == folder_name and entry["entry"]["isFolder"]:
-                            return entry["entry"]["id"]
+                    if entries:
+                        return entries[0]["entry"]["id"]
+                    else:
+                        url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children"
+                        resp = session.get(url)
+                        resp.raise_for_status()
 
-                    # Se não encontrar mesmo após busca, levantar erro
-                    raise Exception(f"Pasta '{folder_name}' não encontrada após erro 409")
-            else:
-                raise
+                        for entry in resp.json()["list"]["entries"]:
+                            if entry["entry"]["name"] == folder_name and entry["entry"]["isFolder"]:
+                                return entry["entry"]["id"]
+
+                        raise Exception(f"Pasta '{folder_name}' não encontrada após erro 409")
+                else:
+                    if attempt < max_retries - 1:
+                        self.log(
+                            f"⚠️  Erro HTTP {e.response.status_code} na pasta '{folder_name}' (tentativa {attempt + 1}/{max_retries})",
+                            depth)
+                        self.log(f"🔄 Recriando sessão e tentando novamente...")
+                        time.sleep(retry_delay * (attempt + 1))
+                    else:
+                        raise
+
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    self.log(f"⚠️  Erro de rede na pasta '{folder_name}' (tentativa {attempt + 1}/{max_retries}): {e}",
+                             depth)
+                    self.log(f"🔄 Recriando sessão e tentando novamente...")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    raise
 
     def file_exists(self, parent_id, file_name):
-        # Forma simples sem parâmetros complexos
-        url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children?where=(isFile=true)"
-        resp = session.get(url)
-        resp.raise_for_status()
-        for entry in resp.json()["list"]["entries"]:
-            if entry["entry"]["name"] == file_name:
-                return True
-        return False
+        """Verifica se arquivo existe com retry e reconexão"""
+        max_retries = 3
+        retry_delay = 900
+
+        for attempt in range(max_retries):
+            try:
+                # Cria nova sessão para cada tentativa
+                session = self.create_session()
+                url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children?where=(isFile=true)"
+                resp = session.get(url)
+                resp.raise_for_status()
+                for entry in resp.json()["list"]["entries"]:
+                    if entry["entry"]["name"] == file_name:
+                        return True
+                return False
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    self.log(f"⚠️  Erro ao verificar arquivo '{file_name}' (tentativa {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    raise
 
     def upload_file(self, parent_id, file_path, depth=0):
+        """Upload de arquivo com retry e reconexão para erros de rede"""
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
 
-        if self.file_exists(parent_id, file_name):
-            self.log(f"ℹ Arquivo já existe, pulando: {file_name} ({self.format_size(file_size)})", depth)
-            self.stats['skipped_files'] += 1
-            self.stats['skipped_size_bytes'] += file_size
-            self.update_progress()
-            return
+        max_retries = 3
+        retry_delay = 900
 
-        url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children"
-        try:
-            with open(file_path, "rb") as f:
-                files = {
-                    "filedata": (file_name, f),
-                    "name": (None, file_name)
-                }
-                resp = session.post(url, files=files)
-                resp.raise_for_status()
-            self.log(f"📄 Enviado: {file_name} ({self.format_size(file_size)})", depth)
-            self.stats['uploaded_files'] += 1
-            self.stats['uploaded_size_bytes'] += file_size
-            self.update_progress()
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 409:
-                self.log(f"ℹ Arquivo já existe (409), pulando: {file_name} ({self.format_size(file_size)})", depth)
-                self.stats['skipped_files'] += 1
-                self.stats['skipped_size_bytes'] += file_size
+        for attempt in range(max_retries):
+            try:
+                # Cria nova sessão para cada tentativa
+                session = self.create_session()
+
+                if self.file_exists(parent_id, file_name):
+                    self.log(f"ℹ Arquivo já existe, pulando: {file_name} ({self.format_size(file_size)})", depth)
+                    self.stats['skipped_files'] += 1
+                    self.stats['skipped_size_bytes'] += file_size
+                    self.update_progress()
+                    return
+
+                url = f"{ALFRESCO_URL}/api/-default-/public/alfresco/versions/1/nodes/{parent_id}/children"
+                with open(file_path, "rb") as f:
+                    files = {
+                        "filedata": (file_name, f),
+                        "name": (None, file_name)
+                    }
+                    resp = session.post(url, files=files)
+                    resp.raise_for_status()
+
+                self.log(f"📄 Enviado: {file_name} ({self.format_size(file_size)})", depth)
+                self.stats['uploaded_files'] += 1
+                self.stats['uploaded_size_bytes'] += file_size
                 self.update_progress()
-            else:
-                raise
+                return  # Sucesso, sai do loop
+
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 409:
+                    self.log(f"ℹ Arquivo já existe (409), pulando: {file_name} ({self.format_size(file_size)})", depth)
+                    self.stats['skipped_files'] += 1
+                    self.stats['skipped_size_bytes'] += file_size
+                    self.update_progress()
+                    return
+                else:
+                    if attempt < max_retries - 1:
+                        self.log(
+                            f"⚠️  Erro HTTP {e.response.status_code} no arquivo '{file_name}' (tentativa {attempt + 1}/{max_retries})",
+                            depth)
+                        self.log(f"🔄 Recriando sessão e tentando novamente...")
+                        time.sleep(retry_delay * (attempt + 1))
+                    else:
+                        raise
+
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    self.log(f"⚠️  Erro de rede no arquivo '{file_name}' (tentativa {attempt + 1}/{max_retries}): {e}",
+                             depth)
+                    self.log(f"🔄 Recriando sessão e tentando novamente...")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    raise
 
     def calculate_total_files_and_size(self, local_dir):
         """Calcula o total de arquivos e tamanho total"""
@@ -366,6 +465,8 @@ Log salvo em: {LOG_FILE}
             self.console.print(Panel(err_msg, title="Erro", border_style="red"))
         finally:
             self.live = None  # Limpa referência
+            if self.session:
+                self.session.close()  # Fecha a sessão ao finalizar
             self.show_final_report()
             input("\nPressione ENTER para fechar...")
 
