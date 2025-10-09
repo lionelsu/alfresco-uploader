@@ -185,6 +185,8 @@ fabric.properties
 # .idea
 
 ico
-release
+release/build
+release/dist
 logs/*.txt
+main2.py.OLD
 pyinstaller_command.txt

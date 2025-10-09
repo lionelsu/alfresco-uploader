@@ -2,7 +2,7 @@ import sys
 import os
 import requests
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 import traceback
 import time
 from rich.console import Console
@@ -10,7 +10,6 @@ from rich.panel import Panel
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 from rich.layout import Layout
 from rich.live import Live
-from rich.text import Text
 
 # --- Base do projeto ---
 if getattr(sys, 'frozen', False):
@@ -413,6 +412,13 @@ class UploadManager:
                         time.sleep(polling_interval)
                     else:
                         break  # Sai do while e vai para a próxima tentativa
+
+                # 🔥 ADICIONE ESTAS 4 LINHAS AQUI:
+                except OSError as e:
+                    self.log(f"❌ Erro de arquivo: {file_name} - {e}", depth)
+                    self.stats['skipped_files'] += 1
+                    self.update_progress()
+                    return
 
             # Se chegou aqui, esgotou o tempo de 1600s para esta tentativa
             if attempt < max_retries - 1:
