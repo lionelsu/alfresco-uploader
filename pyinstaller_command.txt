@@ -1,0 +1,1 @@
+# pyinstaller --clean --noconfirm --onefile --console --icon="ico/ico.ico" --name AlfrescoUploader --distpath release/dist --workpath release/build --specpath release main.py
